@@ -2,8 +2,8 @@
 
 MATLAB scripts reproducing all figures and tables in the manuscript:
 
-> **[Manuscript title here]**  
-> [Author(s)], [Journal], [Year]
+> **[Solar Wind–Magnetosphere Coupling Functions as Proxies for Energetic Electron Precipitation: Evidence for Time-Scale Dependence and Internal Modulation]**  
+> [M. Ocholi, A.O. Akala, E.O. Oyeyemi, G. D. Reeves], [JGR], [2026]
 
 ---
 
