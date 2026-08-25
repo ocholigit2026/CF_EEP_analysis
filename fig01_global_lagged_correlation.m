@@ -1,0 +1,209 @@
+%% ================================================================
+%  FIGURE 1: GLOBAL CF-EEP LAGGED CORRELATIONS
+%
+%  3 x 3 panel figure
+%    Rows    = energy channels (>30, >100, >300 keV)
+%    Columns = L-shell ranges (L=2-4, L=4-6, L=6-10)
+%
+%  Particle data layout: [nVar x nTime x nMLT x nL]
+%    Variable 7 = mep0e1 (>30  keV)
+%    Variable 8 = mep0e2 (>100 keV)
+%    Variable 9 = mep0e3 (>300 keV)
+%
+%  Positive lag = solar wind coupling leads EEP.
+%
+%  ---------------------------------------------------------------
+%  REQUIRED WORKSPACE (from load_data.m)
+%
+%  fluxdata_2009_2019H_4D_new : [nVar x nTime x nL x nMLT]
+%  KL_z, EPS_z                : standardised coupling functions
+%  L_values, MLT_values       : spatial grids
+%
+% ================================================================
+
+%% ----------------------------------------------------------------
+%  1. SETTINGS
+%% ----------------------------------------------------------------
+
+maxLag = 24;
+lags   = 0:maxLag;
+
+L_values   = 1:0.25:15;
+MLT_values = 0:23;
+
+L_ranges = [2 4; 4 6; 6 10];
+L_labels = {'L = 2--4', 'L = 4--6', 'L = 6--10'};
+nLranges = size(L_ranges, 1);
+
+energyLabels = {'>30 keV', '>100 keV', '>300 keV'};
+
+%% ----------------------------------------------------------------
+%  2. EXTRACT ELECTRON CHANNELS
+%     fluxdata layout: nVar x nTime x nL x nMLT
+%     Result: mep0eN = [nTime x nL x nMLT]
+%% ----------------------------------------------------------------
+
+fluxdata = fluxdata_2009_2019H_4D_new;
+
+mep0e1 = squeeze(fluxdata(7,:,:,:));
+mep0e2 = squeeze(fluxdata(8,:,:,:));
+mep0e3 = squeeze(fluxdata(9,:,:,:));
+
+electronFlux = {mep0e1, mep0e2, mep0e3};
+
+%% ----------------------------------------------------------------
+%  3. GLOBAL MLT SELECTION
+%% ----------------------------------------------------------------
+
+MLT_global = true(size(MLT_values));
+
+%% ----------------------------------------------------------------
+%  4. PREALLOCATE
+%% ----------------------------------------------------------------
+
+R_KL_global  = nan(3, nLranges, numel(lags));
+R_EPS_global = nan(3, nLranges, numel(lags));
+
+peakR_KL_global   = nan(3, nLranges);
+peakR_EPS_global  = nan(3, nLranges);
+peakLag_KL_global = nan(3, nLranges);
+peakLag_EPS_global = nan(3, nLranges);
+
+%% ----------------------------------------------------------------
+%  5. GLOBAL CORRELATION ANALYSIS
+%% ----------------------------------------------------------------
+
+fprintf('\n============================================================\n');
+fprintf('FIGURE 1: GLOBAL CORRELATIONS\n');
+fprintf('============================================================\n');
+
+for e = 1:3
+
+    flux = electronFlux{e};
+
+    for lr = 1:nLranges
+
+        L_use   = L_values >= L_ranges(lr,1) & L_values <= L_ranges(lr,2);
+        MLT_use = MLT_global;
+
+        % flux layout: [nTime x nMLT x nL]
+        % Average over MLT (dim 2) then L (dim 3)
+        J = squeeze(mean(mean(flux(:,MLT_use,L_use), 2, 'omitnan'), 3, 'omitnan'));
+
+        J(J <= 0) = NaN;
+        J = log10(J);
+
+        for k = 1:numel(lags)
+
+            lag = lags(k);
+
+            xKL  = KL_z(1:end-lag);
+            xEPS = EPS_z(1:end-lag);
+            y    = J(1+lag:end);
+
+            valid = isfinite(xKL) & isfinite(y);
+            if sum(valid) >= 3
+                R_KL_global(e,lr,k) = corr(xKL(valid), y(valid), 'rows', 'complete');
+            end
+
+            valid = isfinite(xEPS) & isfinite(y);
+            if sum(valid) >= 3
+                R_EPS_global(e,lr,k) = corr(xEPS(valid), y(valid), 'rows', 'complete');
+            end
+
+        end
+
+        [peakR_KL_global(e,lr),  idxKL]  = max(R_KL_global(e,lr,:),  [], 'omitnan');
+        [peakR_EPS_global(e,lr), idxEPS] = max(R_EPS_global(e,lr,:), [], 'omitnan');
+
+        peakLag_KL_global(e,lr)  = lags(idxKL);
+        peakLag_EPS_global(e,lr) = lags(idxEPS);
+
+        fprintf('%s | %s | KL = %.3f (%dh) | EPS = %.3f (%dh)\n', ...
+            energyLabels{e}, L_labels{lr}, ...
+            peakR_KL_global(e,lr),  peakLag_KL_global(e,lr), ...
+            peakR_EPS_global(e,lr), peakLag_EPS_global(e,lr));
+
+    end
+end
+
+%% ----------------------------------------------------------------
+%  6. FIGURE 1
+%% ----------------------------------------------------------------
+
+figure('Color', 'w', 'Position', [100 50 1200 950]);
+
+for e = 1:3
+    for lr = 1:nLranges
+
+        subplot(3, 3, (e-1)*3 + lr);
+        hold on;
+
+        RKL  = squeeze(R_KL_global(e,lr,:));
+        REPS = squeeze(R_EPS_global(e,lr,:));
+
+        plot(lags, RKL,  'LineWidth', 2);
+        plot(lags, REPS, 'LineWidth', 2);
+
+        plot(peakLag_KL_global(e,lr),  peakR_KL_global(e,lr),  'o', 'MarkerSize', 7, 'LineWidth', 1.5);
+        plot(peakLag_EPS_global(e,lr), peakR_EPS_global(e,lr), 's', 'MarkerSize', 7, 'LineWidth', 1.5);
+
+        xlim([0 maxLag]);
+        ylim([0 0.7]);
+        xticks(0:4:maxLag);
+        yticks(0:0.1:0.7);
+        grid on; box on;
+
+        if e == 1
+            title(L_labels{lr}, 'FontWeight', 'bold');
+        end
+
+        if lr == 1
+            ylabel({energyLabels{e}; 'Correlation'});
+        end
+
+        if e == 3 && lr == 2
+            xlabel('Lag [Hour]');
+        end
+
+        text(0.04*maxLag, 0.63, sprintf('KL: %.2f @ %dh', peakR_KL_global(e,lr), peakLag_KL_global(e,lr)), 'FontSize', 8);
+        text(0.04*maxLag, 0.56, sprintf('\\epsilon: %.2f @ %dh', peakR_EPS_global(e,lr), peakLag_EPS_global(e,lr)), 'FontSize', 8);
+
+        if e == 1 && lr == 1
+            legend('KL', '\epsilon', 'Location', 'northeast');
+        end
+
+        if lr == 2 && e == 1
+            legend('', '', 'Peak KL', 'Peak \epsilon', 'Location', 'southeast');
+        end
+
+    end
+end
+
+%% ----------------------------------------------------------------
+%  7. SUMMARY OUTPUT
+%% ----------------------------------------------------------------
+
+fprintf('\n============================================================\n');
+fprintf('GLOBAL PEAK LAGS\n');
+fprintf('============================================================\n');
+
+for e = 1:3
+    fprintf('\n%s\n', energyLabels{e});
+    for lr = 1:nLranges
+        fprintf('%s: KL = %.3f @ %dh | EPS = %.3f @ %dh\n', ...
+            L_labels{lr}, ...
+            peakR_KL_global(e,lr),  peakLag_KL_global(e,lr), ...
+            peakR_EPS_global(e,lr), peakLag_EPS_global(e,lr));
+    end
+end
+
+%% ----------------------------------------------------------------
+%  8. SAVE
+%% ----------------------------------------------------------------
+
+save('Revised_Figure1_results.mat', ...
+    'R_KL_global', 'R_EPS_global', ...
+    'peakR_KL_global', 'peakR_EPS_global', ...
+    'peakLag_KL_global', 'peakLag_EPS_global', ...
+    'lags', 'L_values', 'MLT_values', 'L_ranges');
