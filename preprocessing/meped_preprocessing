@@ -1,0 +1,349 @@
+%% ================================================================
+%  MEPED PARTICLE DATA PREPROCESSING
+%
+%  PURPOSE:
+%  This script documents how raw multi-satellite MEPED observations
+%  were aggregated into the hourly L-shell × MLT gridded data
+%  structure used in the analysis. It is provided for transparency
+%  and reproducibility, and is NOT part of the main analysis flow.
+%
+%  Run this script only if you need to reproduce the processed
+%  particle data file from the raw satellite timetables.
+%  The processed output (MEPED_particle_reproduced_optimized.mat)
+%  is what load_data.m expects.
+%
+%  INPUTS:
+%    radBelt2009_2014  : MEPED timetable, 2009–2014
+%    radBelt2015_2019  : MEPED timetable, 2015–2019
+%    swdata_2009_2019H : hourly solar wind timetable (for time grid)
+%
+%  OUTPUTS (saved to OUT_FILE):
+%    fluxdata_2009_2019H_4D_new  [nVar x nTime x nMLT x nL]
+%    ParticleHourly              timetable: Jp30, Jp100, Jp300,
+%                                logJp30, logJp100, logJp300
+%    ParticleMLT30/100/300       timetables: time x 24 MLT columns
+%    L_edges, MLT_edges, Lidx, t_hr
+%
+%  Variable index (row) in 4-D array:
+%    7   mep0e1  (>30  keV, 0°)
+%    8   mep0e2  (>100 keV, 0°)
+%    9   mep0e3  (>300 keV, 0°)
+%   10   mep90e1 (>30  keV, 90°)
+%   11   mep90e2 (>100 keV, 90°)
+%   12   mep90e3 (>300 keV, 90°)
+%
+% ================================================================
+
+fprintf('\n============================================================\n');
+fprintf('MEPED PARTICLE PREPROCESSING\n');
+fprintf('============================================================\n');
+
+%% ================================================================
+%% DATA PATHS  (edit to match your directory layout)
+%% ================================================================
+
+RAW_FILE = fullfile('C:', 'Users', 'mamud', 'DATA HOUSE', ...
+                    'poes', 'raw_data', ...
+                    'radBelt_data_2009_2019.mat');
+
+SW_FILE  = fullfile('C:', 'Users', 'mamud', 'DATA HOUSE', ...
+                    'OMNIWEB DATA', 'hourly', ...
+                    'swdataTT_2009_2019H_filtered.mat');
+
+OUT_FILE = fullfile('C:', 'Users', 'mamud', 'DATA HOUSE', ...
+                    'poes', 'raw_data', ...
+                    'MEPED_particle_reproduced_optimized.mat');
+
+%% ================================================================
+%% 1. LOAD RAW DATA
+%% ================================================================
+
+fprintf('\nLoading raw data ...\n');
+load(RAW_FILE);
+load(SW_FILE, 'swdata_2009_2019H');
+
+%% ================================================================
+%% 2. SELECT VARIABLES
+%% ================================================================
+
+selectedVars = { ...
+    'lval', 'folon', 'folat', 'mlt', ...
+    'pas0', 'pas90', ...
+    'mep0e1',  'mep0e2',  'mep0e3', ...
+    'mep90e1', 'mep90e2', 'mep90e3'};
+
+%% ================================================================
+%% 3. POOL AND SORT CHRONOLOGICALLY
+%% ================================================================
+
+fprintf('\nPooling satellite data ...\n');
+
+data1 = radBelt2009_2014(:, selectedVars);
+data2 = radBelt2015_2019(:, selectedVars);
+
+radBeltFlux = [data1; data2];
+clear data1 data2
+
+radBeltFlux = sortrows(radBeltFlux, 'Time');
+fprintf('Total pooled observations: %d\n', height(radBeltFlux));
+
+%% ================================================================
+%% 4. MAP OBSERVATIONS ONTO 16-s GRID (nearest-neighbour)
+%% ================================================================
+
+fprintf('\nMapping observations onto 16-s grid ...\n');
+
+tRaw         = radBeltFlux.Time;
+t0           = min(tRaw);
+secFromStart = seconds(tRaw - t0);
+
+gridIndex16 = round(secFromStart / 16);
+nGrid16     = floor(max(secFromStart) / 16);
+
+valid16      = gridIndex16 >= 0 & gridIndex16 <= nGrid16;
+radBeltFlux  = radBeltFlux(valid16, :);
+gridIndex16  = gridIndex16(valid16);
+secFromStart = secFromStart(valid16);
+tRaw         = tRaw(valid16);
+clear valid16
+
+%% ================================================================
+%% 5. RETAIN ONE OBSERVATION PER 16-s SLOT
+%% ================================================================
+
+dist16      = abs(secFromStart - gridIndex16 * 16);
+originalRow = (1:numel(gridIndex16))';
+
+sortKey = [gridIndex16(:), dist16(:), originalRow(:)];
+[~, sortOrder] = sortrows(sortKey, [1 2 3]);
+
+gridSorted = gridIndex16(sortOrder);
+keep       = [true; diff(gridSorted) ~= 0];
+keepOrder  = sort(sortOrder(keep));
+
+radBelt16 = radBeltFlux(keepOrder, :);
+clear radBeltFlux tRaw secFromStart gridIndex16
+clear dist16 originalRow sortKey sortOrder gridSorted keep keepOrder
+
+fprintf('Observations after 16-s mapping: %d\n', height(radBelt16));
+
+%% ================================================================
+%% 6. DEFINE L-SHELL AND MLT BINS
+%%    L   bins: 1.00 to 15.00 in 0.25 steps  (57 bins)
+%%    MLT bins: 0–1 to 23–24 in 1-h steps    (24 bins)
+%% ================================================================
+
+L_edges   = 1:0.25:15.25;
+MLT_edges = 0:1:24;
+
+nL   = numel(L_edges)   - 1;
+nMLT = numel(MLT_edges) - 1;
+
+fprintf('\nL-shell bins : %d\n', nL);
+fprintf('MLT bins     : %d\n', nMLT);
+
+%% ================================================================
+%% 7. ASSIGN OBSERVATIONS TO SPATIAL BINS
+%% ================================================================
+
+Lbin   = discretize(radBelt16.lval, L_edges);
+MLTbin = discretize(radBelt16.mlt,  MLT_edges);
+
+validSpatial = isfinite(Lbin) & isfinite(MLTbin);
+radBelt16    = radBelt16(validSpatial, :);
+Lbin         = Lbin(validSpatial);
+MLTbin       = MLTbin(validSpatial);
+clear validSpatial
+
+%% ================================================================
+%% 8. EXTRACT PARTICLE CHANNELS
+%% ================================================================
+
+E1_0  = double(radBelt16.mep0e1);
+E2_0  = double(radBelt16.mep0e2);
+E3_0  = double(radBelt16.mep0e3);
+
+E1_90 = double(radBelt16.mep90e1);
+E2_90 = double(radBelt16.mep90e2);
+E3_90 = double(radBelt16.mep90e3);
+
+%% ================================================================
+%% 9. HOURLY TIME VECTOR (from solar wind timetable)
+%% ================================================================
+
+t_hr  = swdata_2009_2019H.Time(:);
+nTime = numel(t_hr);
+
+if ~issorted(t_hr)
+    error('The hourly solar-wind time vector is not sorted.');
+end
+if numel(unique(t_hr)) ~= nTime
+    error('The hourly solar-wind time vector contains duplicate timestamps.');
+end
+
+fprintf('Hourly time points: %d\n', nTime);
+
+%% ================================================================
+%% 10. ASSIGN OBSERVATIONS TO HOURLY BINS
+%% ================================================================
+
+hourEdges = [t_hr; t_hr(end) + hours(1)];
+hourIndex = discretize(radBelt16.Time, hourEdges);
+
+validHour = ~isnan(hourIndex);
+radBelt16 = radBelt16(validHour, :);
+Lbin      = Lbin(validHour);
+MLTbin    = MLTbin(validHour);
+hourIndex = hourIndex(validHour);
+
+E1_0  = E1_0(validHour);   E2_0  = E2_0(validHour);   E3_0  = E3_0(validHour);
+E1_90 = E1_90(validHour);  E2_90 = E2_90(validHour);  E3_90 = E3_90(validHour);
+clear validHour hourEdges
+
+%% ================================================================
+%% 11. CREATE GROUP IDs FOR ACCUMARRAY
+%%     Ordering: time × MLT × L
+%% ================================================================
+
+groupID = hourIndex ...
+        + (MLTbin - 1) * nTime ...
+        + (Lbin   - 1) * nTime * nMLT;
+
+nGroups = nTime * nMLT * nL;
+
+%% ================================================================
+%% 12. COMPUTE HOURLY MEDIAN PER L × MLT CELL
+%% ================================================================
+
+fprintf('\nCalculating hourly L-MLT medians ...\n');
+tic
+
+medianFunc = @(x) median(x, 'omitnan');
+
+E1_0_hr  = accumarray(groupID, E1_0,  [nGroups 1], medianFunc, NaN);
+E2_0_hr  = accumarray(groupID, E2_0,  [nGroups 1], medianFunc, NaN);
+E3_0_hr  = accumarray(groupID, E3_0,  [nGroups 1], medianFunc, NaN);
+E1_90_hr = accumarray(groupID, E1_90, [nGroups 1], medianFunc, NaN);
+E2_90_hr = accumarray(groupID, E2_90, [nGroups 1], medianFunc, NaN);
+E3_90_hr = accumarray(groupID, E3_90, [nGroups 1], medianFunc, NaN);
+
+toc
+
+%% ================================================================
+%% 13. RESHAPE TO [nTime × nMLT × nL]
+%% ================================================================
+
+E1_0_3D  = reshape(E1_0_hr,  [nTime nMLT nL]);
+E2_0_3D  = reshape(E2_0_hr,  [nTime nMLT nL]);
+E3_0_3D  = reshape(E3_0_hr,  [nTime nMLT nL]);
+E1_90_3D = reshape(E1_90_hr, [nTime nMLT nL]);
+E2_90_3D = reshape(E2_90_hr, [nTime nMLT nL]);
+E3_90_3D = reshape(E3_90_hr, [nTime nMLT nL]);
+
+%% ================================================================
+%% 14. ASSEMBLE 4-D ARRAY  [nVar × nTime × nMLT × nL]
+%% ================================================================
+
+nVar = numel(selectedVars);
+
+fluxdata_2009_2019H_4D_new = NaN(nVar, nTime, nMLT, nL);
+
+fluxdata_2009_2019H_4D_new(7,  :, :, :) = E1_0_3D;
+fluxdata_2009_2019H_4D_new(8,  :, :, :) = E2_0_3D;
+fluxdata_2009_2019H_4D_new(9,  :, :, :) = E3_0_3D;
+fluxdata_2009_2019H_4D_new(10, :, :, :) = E1_90_3D;
+fluxdata_2009_2019H_4D_new(11, :, :, :) = E2_90_3D;
+fluxdata_2009_2019H_4D_new(12, :, :, :) = E3_90_3D;
+
+%% ================================================================
+%% 15. L = 4–6 INDEX RANGE
+%% ================================================================
+
+Lidx = 13:21;
+
+%% ================================================================
+%% 16. EXTRACT 0-DEGREE ELECTRON CHANNELS
+%% ================================================================
+
+mep0e1_3D = squeeze(fluxdata_2009_2019H_4D_new(7, :, :, :));
+mep0e2_3D = squeeze(fluxdata_2009_2019H_4D_new(8, :, :, :));
+mep0e3_3D = squeeze(fluxdata_2009_2019H_4D_new(9, :, :, :));
+
+%% ================================================================
+%% 17. GLOBAL 1-D PARTICLE SERIES
+%% ================================================================
+
+Jp30  = squeeze(mean(mean(mep0e1_3D(:, :, Lidx), 2, 'omitnan'), 3, 'omitnan'));
+Jp100 = squeeze(mean(mean(mep0e2_3D(:, :, Lidx), 2, 'omitnan'), 3, 'omitnan'));
+Jp300 = squeeze(mean(mean(mep0e3_3D(:, :, Lidx), 2, 'omitnan'), 3, 'omitnan'));
+
+%% ================================================================
+%% 18. MLT-RESOLVED PARTICLE SERIES  [nTime × nMLT]
+%% ================================================================
+
+ParticleMLT30_array  = squeeze(mean(mep0e1_3D(:, :, Lidx), 3, 'omitnan'));
+ParticleMLT100_array = squeeze(mean(mep0e2_3D(:, :, Lidx), 3, 'omitnan'));
+ParticleMLT300_array = squeeze(mean(mep0e3_3D(:, :, Lidx), 3, 'omitnan'));
+
+%% ================================================================
+%% 19. HOURLY PARTICLE TIMETABLE
+%% ================================================================
+
+ParticleHourly = timetable(t_hr, Jp30, Jp100, Jp300, ...
+    'VariableNames', {'Jp30', 'Jp100', 'Jp300'});
+
+logJp30  = NaN(size(Jp30));
+logJp100 = NaN(size(Jp100));
+logJp300 = NaN(size(Jp300));
+
+idx = isfinite(Jp30)  & Jp30  > 0;  logJp30(idx)  = log10(Jp30(idx));
+idx = isfinite(Jp100) & Jp100 > 0;  logJp100(idx) = log10(Jp100(idx));
+idx = isfinite(Jp300) & Jp300 > 0;  logJp300(idx) = log10(Jp300(idx));
+
+ParticleHourly.logJp30  = logJp30;
+ParticleHourly.logJp100 = logJp100;
+ParticleHourly.logJp300 = logJp300;
+
+%% ================================================================
+%% 20. MLT TIMETABLES WITH LABELLED COLUMNS
+%% ================================================================
+
+ParticleMLT30  = array2timetable(ParticleMLT30_array,  'RowTimes', t_hr);
+ParticleMLT100 = array2timetable(ParticleMLT100_array, 'RowTimes', t_hr);
+ParticleMLT300 = array2timetable(ParticleMLT300_array, 'RowTimes', t_hr);
+
+MLTnames = cell(1, nMLT);
+for k = 1:nMLT
+    MLTnames{k} = sprintf('MLT_%02d_%02d', MLT_edges(k), MLT_edges(k+1));
+end
+
+ParticleMLT30.Properties.VariableNames  = MLTnames;
+ParticleMLT100.Properties.VariableNames = MLTnames;
+ParticleMLT300.Properties.VariableNames = MLTnames;
+
+%% ================================================================
+%% 21. VALIDATION
+%% ================================================================
+
+fprintf('\n============================================================\n');
+fprintf('PREPROCESSING COMPLETE\n');
+fprintf('============================================================\n');
+fprintf('4-D array size : [%d x %d x %d x %d]\n', nVar, nTime, nMLT, nL);
+fprintf('Jp30  : %d finite of %d\n', sum(isfinite(Jp30)),  numel(Jp30));
+fprintf('Jp100 : %d finite of %d\n', sum(isfinite(Jp100)), numel(Jp100));
+fprintf('Jp300 : %d finite of %d\n', sum(isfinite(Jp300)), numel(Jp300));
+
+R_check = corr(Jp30, 10.^logJp30, 'Rows', 'complete');
+fprintf('Self-consistency check r(Jp30, 10^logJp30) = %.6f\n', R_check);
+
+% %% ================================================================
+% %% 22. SAVE
+% %% ================================================================
+% 
+% save(OUT_FILE, ...
+%     'ParticleHourly', ...
+%     'ParticleMLT30', 'ParticleMLT100', 'ParticleMLT300', ...
+%     'fluxdata_2009_2019H_4D_new', ...
+%     'L_edges', 'MLT_edges', 'Lidx', 't_hr', '-v7.3');
+% 
+% fprintf('\nSaved to: %s\n', OUT_FILE);
